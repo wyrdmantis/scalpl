@@ -6,56 +6,9 @@
 
 (in-package #:scalpl.qd)
 
-(defun asset-funds (asset funds)
-  (aif (find asset funds :key #'asset) (scaled-quantity it) 0))
-
 ;;;
 ;;;  ENGINE
 ;;;
-
-(defclass supplicant (parent)
-  ((gate :initarg :gate) (market :initarg :market :reader market) placed
-   (response :initform (make-instance 'channel))
-   (abbrev :allocation :class :initform "supplicant")
-   (treasurer :initarg :treasurer) (lictor :initarg :lictor) (fee :initarg :fee)
-   (order-slots :initform 40 :initarg :order-slots)))
-
-(defun offers-spending (ope asset)
-  (remove asset (slot-value ope 'placed)
-          :key #'consumed-asset :test-not #'eq))
-
-(defun balance-guarded-place (ope offer)
-  (with-slots (gate placed order-slots treasurer) ope
-    (let ((asset (consumed-asset offer)))
-      (when (and (>= (asset-funds asset (slot-reduce treasurer balances))
-                     (reduce #'+ (mapcar #'volume (offers-spending ope asset))
-                             :initial-value (volume offer)))
-                 (> order-slots (length placed)))
-        (awhen1 (post-offer gate offer) (push it placed))))))
-
-(defmethod execute ((supplicant supplicant) (command cons))
-  (with-slots (gate response placed) supplicant
-    (send response
-          (ecase (car command)
-            (offer (balance-guarded-place supplicant (cdr command)))
-            (cancel (awhen1 (cancel-offer gate (cdr command))
-                      (setf placed (remove (cdr command) placed))))))))
-
-(defmethod initialize-instance :after ((supp supplicant) &key)
-  (macrolet ((init (slot class)
-               `(unless (ignore-errors ,slot)
-                  (adopt supp (setf ,slot (make-instance
-                                           ',class :delegates `(,supp)))))))
-    (with-slots (fee lictor treasurer placed market gate) supp
-      (adopt supp (ensure-running market)) (adopt supp gate)
-      (unless (ignore-errors placed) (setf placed (placed-offers gate)))
-      (init   fee          fee-tracker)
-      (init  lictor  execution-tracker)
-      (init treasurer  balance-tracker))))
-
-(defmethod christen ((supplicant supplicant) (type (eql 'actor)))
-  (with-aslots (gate market) supplicant
-    (format nil "~A ~A" (name gate) (name market))))
 
 (defun ope-placed (ope)
   (with-slots (placed) (slot-value ope 'supplicant)
@@ -67,12 +20,12 @@
 ;;; response: placed offer if successful, nil if not
 (defun ope-place (ope offer)
   (with-slots (control response) ope
-    (send control (cons 'offer offer)) (recv response)))
+    (send control (cons :offer offer)) (recv response)))
 
 ;;; response: trueish = offer no longer placed, nil = unknown badness
 (defun ope-cancel (ope offer)
   (with-slots (control response) (slot-value ope 'supplicant)
-    (send control (cons 'cancel offer)) (recv response)))
+    (send control (cons :cancel offer)) (recv response)))
 
 (defclass filter (actor)
   ((abbrev :allocation :class :initform "filter")
@@ -135,7 +88,7 @@
            (if excess (frob () excess)  ; choose the lesser weevil
                (and target placed (= (length target) (length placed))
                     (loop for new in target and old in placed
-                       when (< 1/19 (abs (log (/ (volume new) (volume old)))))
+                       when (/= (given new) (given old))
                        collect new into news and collect old into olds
                        finally (when news (frob news olds)))))))))
 
@@ -222,22 +175,27 @@
             (bases-without bases (cons-aq* (consumed-asset car) (volume car)))
           (flet ((profit (o)
                    (funcall punk (1- (price o)) (price vwab) (cdar funds))))
-            (signal "~4,2@$ ~A ~D ~V$ ~V$" (profit car) car (length bases)
-                    (decimals (market vwab)) (scaled-price vwab)
-                    (decimals (asset cost)) (scaled-quantity cost))
-            (setf book (rest (member 0 book :test #'< :key #'profit)))
-            (if (plusp (profit car))
+            (when vwab
+              (signal "~4,2@$ ~A ~D ~V$ ~V$" (profit car) car (length bases)
+                      (decimals (market vwab)) (scaled-price vwab)
+                      (decimals (asset cost)) (scaled-quantity cost))
+              (setf book (rest (member 0 book :test #'< :key #'profit))))
+            (if (and vwab (plusp (profit car)))
                 `(,car .,(ope-sprinner
                           cdr (destructuring-bind ((caar . cdar) . cdr) funds
                                 (aprog1 `((,(- caar (volume car)) .,cdar) .,cdr)
                                   (signal "~S" it)))
                           (1- count) magic bases punk dunk book))
                 (ope-sprinner (funcall dunk book funds count magic) funds
-                              count magic `((,vwab ,(aq* vwab cost) ,cost)
-                                            ,@bases) punk dunk book)))))))
+                              count magic (and vwab `((,vwab ,(aq* vwab cost)
+                                                             ,cost) ,@bases))
+                              punk dunk book)))))))
 
 (defun ope-logger (ope)
-  (lambda (log) (awhen (slot-value ope 'spam) (format t "~&~A ~A~%" it log))))
+  (lambda (log)
+    (awhen (slot-value ope 'spam)
+      (format t "~:[~*~;~&~A~] ~A~@*~:[~%~;~]"
+              (cdr (simple-condition-format-arguments log)) it log))))
 
 (defun ope-spreader (book resilience funds epsilon side ope)
   (flet ((dunk (book funds count magic &optional (start epsilon))
@@ -336,14 +294,15 @@
                              (+1 (chr positive-chars (/ dp highest)))
                              (-1 (chr negative-chars (/ dp lowest))))))))))
 
-(defun makereport (maker fund rate btc doge investment risked skew)
+(defun makereport (maker fund rate btc doge investment risked skew &optional ha)
   (with-slots (name market ope snake last-report) maker
-    (let ((new-report (list btc doge investment risked skew)))
-      (if (equal last-report new-report) (return-from makereport)
-          (setf last-report new-report)))
+    (unless ha
+      (let ((new-report (list btc doge investment risked skew)))
+        (if (equal last-report new-report) (return-from makereport)
+            (setf last-report new-report))))
     (labels ((sastr (side amount) ; TODO factor out aqstr
-               (format nil "~V,,V$"
-                       (decimals (slot-value market side)) 0 amount)))
+               (format nil "~V,,V$" (decimals (slot-value market side))
+                       0 (float amount 0d0))))
       ;; FIXME: modularize all this decimal point handling
       ;; we need a pprint-style ~/aq/ function, and pass it aq objects!
       ;; time, total, primary, counter, invested, risked, risk bias, pulse
@@ -382,17 +341,17 @@
             (let* ((buyin (dbz-guard (/ total-btc total-fund)))
                    (btc  (* fund-factor total-btc buyin targeting-factor))
                    (doge (* fund-factor total-doge
-                            (- 1 (* buyin targeting-factor))))
-                   (skew (log (/ doge btc doge/btc))))
+                            (max 0 (- 1 (* buyin targeting-factor)))))
+                   (skew (log (max 1/100 (/ doge btc doge/btc)))))
               ;; report funding
               (makereport maker total-fund doge/btc total-btc total-doge buyin
                           (dbz-guard (/ (total-of    btc  doge) total-fund))
                           (dbz-guard (/ (total-of (- btc) doge) total-fund)))
-              (send (slot-reduce ope input)
-                    (list `((,btc  . ,(* cut (max 0 (/    skew  skew-factor)))))
-                          `((,doge . ,(* cut (max 0 (/ (- skew) skew-factor)))))
-                          resilience (expt (exp skew) skew-factor)))
-              (recv (slot-reduce ope output)))))))))
+              (flet ((f (g h) `((,g . ,(* cut (max 0 (* skew-factor h)))))))
+                (send (slot-reduce ope input)
+                      (list (f btc skew) (f doge (- skew)) resilience
+                            (expt (exp skew) skew-factor)))
+                (recv (slot-reduce ope output))))))))))
 
 (defmethod initialize-instance :after ((maker maker) &key)
   (with-slots (supplicant ope delegates) maker
@@ -455,28 +414,17 @@
                   (/ (* 100 profit) updays total) ; ignores compounding, du'e!
                   (/ (* 100 profit) (/ updays 30) total)))))))
 
-(defgeneric print-book (book &key count prefix)
-  (:method ((maker maker) &rest keys)
-    (macrolet ((path (&rest path)
-                 `(apply #'print-book (slot-reduce maker ,@path) keys)))
-      ;; TODO: interleaving
-      (path ope) (path market book-tracker)))
-  (:method ((ope ope-scalper) &rest keys)
-    (apply #'print-book (multiple-value-call 'cons (ope-placed ope)) keys))
-  (:method ((tracker book-tracker) &rest keys)
-    (apply #'print-book     (recv   (slot-value tracker 'output))    keys))
-  (:method ((book cons) &key count prefix)
-    (destructuring-bind (bids . asks) book
-      (when count (setf bids (subseq bids 0 count) asks (subseq asks 0 count)))
-      (flet ((width (side)
-               (reduce 'max (mapcar 'length (mapcar 'princ-to-string side))
-                       :initial-value 0)))
-        (do ((bids bids (rest bids)) (bw (width bids))
-             (asks asks (rest asks)) (aw (width asks)))
-            ((or (and (null bids) (null asks))
-                 (and (numberp count) (= -1 (decf count)))))
-          (format t "~&~@[~A ~]~V@A || ~V@A~%"
-                  prefix bw (first bids) aw (first asks)))))))
+(defmethod print-book ((maker maker) &rest keys &key market ours wait)
+  (macrolet ((path (&rest path)
+               `(apply #'print-book (slot-reduce ,@path) keys)))
+    (with-slots (response) (slot-reduce maker ope prioritizer)
+      (multiple-value-bind (next source) (when wait (recv response))
+        (let ((placed (multiple-value-call 'cons
+                        (ope-placed (slot-reduce maker ope)))))
+          (path placed) (terpri) (when ours (setf (getf keys :ours) placed))
+          (when source (send source next)))))
+    (when market (path maker market book-tracker))))
+
 
 (defmethod describe-object ((maker maker) (stream t))
   (print-book (slot-reduce maker ope)) (performance-overview maker)

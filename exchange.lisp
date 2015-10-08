@@ -15,11 +15,12 @@
            #:trade #:cost #:direction #:txid
            #:trades-tracker #:trades #:trades-since #:vwap
            #:book-tracker #:bids #:asks #:get-book #:get-book-keys
-           #:balance-tracker #:balances #:sync
+           #:balance-tracker #:balances #:sync #:print-book #:asset-funds
            #:placed-offers #:account-balances #:market-fee
            #:execution #:fee #:net-cost #:net-volume #:fee-tracker
            #:execution-tracker #:execution-since #:bases #:bases-without
-           #:post-offer #:cancel-offer))
+           #:post-offer #:cancel-offer #:supplicant #:lictor #:treasurer
+           #:order-slots #:response))
 
 (in-package #:scalpl.exchange)
 
@@ -262,11 +263,12 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
         (do-slot taken counter (* volume factor) primary volume)))))
 
 (defmethod print-object ((offer offer) stream)
-  (print-unreadable-object (offer stream :type t)
+  (print-unreadable-object
+        (offer stream :type (not (typep offer 'placed)))
     (with-slots (given price market) offer
       (let ((market-decimals (slot-value market 'decimals)))
-        (format stream "~A @ ~V$" given market-decimals
-                (/ (abs price) (expt 10 market-decimals)))))))
+        (format stream "~@[~A ~]~A @ ~V$" (ignore-errors (oid offer)) given
+                market-decimals (/ (abs price) (expt 10 market-decimals)))))))
 
 ;;;
 ;;; Rate Gate
@@ -286,7 +288,9 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
 (defgeneric gate-post (gate pubkey secret request)
   (:documentation "Attempts to perform `request' with the provided credentials.")
   (:method :around (gate pubkey secret request)
-    (rplacd request (call-next-method gate pubkey secret (cdr request)))))
+    (rplacd request                     ; restart may belong in actors.lisp
+            (restart-case (call-next-method gate pubkey secret (cdr request))
+              (abort () :report "Abort request, keep gate" '(() :aborted))))))
 
 (defmethod perform ((gate gate))
   (with-slots (input output . #1=(exchange pubkey secret cache)) gate ;¡ has-a !
@@ -376,7 +380,7 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
   (adopt tracker (setf (slot-value tracker 'fetcher)
                        (make-instance 'trades-fetcher :delegates `(,tracker)))))
 
-(defgeneric vwap (tracker &key type depth &allow-other-keys)
+(defgeneric vwap (tracker &key &allow-other-keys)
   (:method :around ((tracker t) &key)
     (handler-case (call-next-method) (division-by-zero () 0)))
   (:method ((tracker trades-tracker) &key since depth type)
@@ -403,11 +407,12 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
   (:method-combination and)
   (:method and ((tracker t) (prev null) (next t)))
   (:method and ((tracker trades-tracker) (prev trade) (next trade))
-    (with-slots (market-timestamp-sensitivity)
-        (slot-reduce tracker market exchange) ; !
-      (and (string= (direction prev) (direction next))
-           (> market-timestamp-sensitivity
-              (timestamp-difference (timestamp next) (timestamp prev)))))))
+    (with-slots (exchange) (slot-reduce tracker market)
+      (when (slot-boundp exchange 'market-timestamp-sensitivity)
+        (with-slots (market-timestamp-sensitivity) exchange
+          (and (string= (direction prev) (direction next))
+               (> market-timestamp-sensitivity
+                  (timestamp-difference (timestamp next) (timestamp prev)))))))))
 
 ;; (defgeneric same-trades? (trades-tracker prev next)
 ;;   (:method-combination and)
@@ -437,8 +442,8 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
 
 (defmethod perform ((fetcher book-fetcher))
   (with-slots (buffer delay market get-book-keys) fetcher
-    (ignore-errors (send buffer (multiple-value-call 'cons
-                                  (apply #'get-book market get-book-keys))))
+    (send buffer (multiple-value-call 'cons
+                   (apply #'get-book market get-book-keys)))
     (sleep delay)))
 
 (defclass book-tracker (parent)
@@ -479,12 +484,54 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
     (with-slots (%market book trades) new
       (setf %market (shallow-copy prev)) (init book) (init trades))))
 
+;;; tonight we dine in fail
+(defmethod get-book ((market tracked-market) &key)
+  (get-book (slot-value market '%market)))
+
 (defmethod vwap ((market tracked-market) &rest keys)
   (apply #'vwap (slot-value market 'trades-tracker) keys))
 
 (defmethod ensure-running ((market market))
   (change-class market 'tracked-market))
 (defmethod ensure-running ((market tracked-market)) market)
+
+(defgeneric print-book (book &key &allow-other-keys)
+  (:method ((book cons) &key count prefix ours)
+    (destructuring-bind (bids . asks) book
+      (flet ((width (side)
+               (flet ((vol (o) (quantity (given o))))
+                 (loop for o in side repeat (or count 15)
+                    for max = o then (if (> (vol o) (vol max)) o max)
+                    finally (return (length (princ-to-string max)))))))
+        (let ((ctrl (multiple-value-call #'format
+                      () "~~&~~@[~~A ~~]~~~D@A ~~~D@A~~%"
+                      (if (atom ours) (values (width bids) (width asks))
+                          (destructuring-bind (my-bids . my-asks) ours
+                            (values (max (width bids) (width my-bids))
+                                    (max (width asks) (width my-asks))))))))
+          (flet ((line (bid ask) (format t ctrl prefix bid ask)))
+            (if (atom ours)
+                (do ((bids bids (rest bids)) (asks asks (rest asks)))
+                    ((or (and (null bids) (null asks))
+                         (and (numberp count) (= -1 (decf count)))))
+                  (line (first bids) (first asks)))
+                (macrolet ((side (stash mine book)
+                             `(and ,mine (>= (price (car ,book))
+                                             (price (car ,mine)))
+                                   (> (volume (car ,book))
+                                      (volume (setf ,stash (pop ,mine)))))))
+                  (do ((my-bids (car ours)) (my-asks (cdr ours))
+                       (bids bids) (asks asks) (mbid () ()) (mask () ()))
+                      ((or (and (null bids) (null asks))
+                           (and (numberp count) (= -1 (decf count)))))
+                    (let ((bs (side mbid my-bids bids))
+                          (as (side mask my-asks asks)))
+                      (line (or mbid (car bids)) (or mask (car asks)))
+                      (or bs (pop bids)) (or as (pop asks)))))))))))
+  (:method ((tracker book-tracker) &rest keys)
+    (apply #'print-book (recv (slot-value tracker 'output)) keys))
+  (:method ((market tracked-market) &rest keys)
+    (apply #'print-book (slot-value market 'book-tracker) keys)))
 
 ;;;
 ;;; Private Data API
@@ -500,13 +547,16 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
    (abbrev :allocation :class :initform "funds")))
 
 (defmethod perform ((tracker balance-tracker))
-  (with-slots (gate sync buffer fuzz balances) tracker
-    (send (recv sync) (ignore-errors (when (zerop (random fuzz))
-                                       (awhen1 (account-balances gate)
-                                         (setf balances it)))))))
+  (with-slots (gate sync fuzz balances) tracker
+    (send (recv sync) (when (zerop (random fuzz))
+                        (awhen1 (account-balances gate)
+                          (setf balances it))))))
 
 (defmethod christen ((tracker balance-tracker) (type (eql 'actor)))
   (slot-reduce tracker gate name))
+
+(defun asset-funds (asset funds)
+  (aif (find asset funds :key #'asset) (scaled-quantity it) 0))
 
 (defgeneric market-fee (gate market)
   (:documentation "(bid . ask) fees, in percent")
@@ -592,9 +642,10 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
                        (update-bases tracker next))))
 
 (defmethod perform ((tracker execution-tracker))
-  (with-slots (buffer trades bases) tracker
-    (select ((recv buffer next) (update-bases tracker next)
-             (pushnew next trades :key #'txid :test #'equal))
+  (with-slots (buffer trades bases control) tracker
+    (select ((recv buffer next)
+             (update-bases tracker next) (push next trades))
+            ((recv control command) (execute tracker command))
             ((send buffer (first trades))) (t (sleep 0.2)))))
 
 (defmethod initialize-instance :after ((tracker execution-tracker) &key)
@@ -616,19 +667,23 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
 ;;;   ope-spreader (TODO), to check whether a certain offer is profitable
 
 (defun bases-without (bases given)
-  (ignore-errors
-    (loop for basis = (pop bases)
-       for (bp baq other) = basis for acc = baq then (aq+ acc baq)
-       for vwab-sum = other then (aq+ vwab-sum other)
-       when (> (quantity acc) (quantity given)) return
-         (let* ((excess (aq- acc given))
-                (other (cons-aq (asset other)
-                                (* (quantity other)
-                                   (/ (quantity excess) (quantity baq)))))
-                (recur (aq- vwab-sum other)))
-           (values (cons (list bp excess other) bases) (aq/ recur given) recur))
-       when (null bases) return
-         (values nil (aq/ vwab-sum acc) vwab-sum))))
+  (handler-case
+      (loop for basis = (pop bases) for (bp baq other) = basis
+         for acc = baq then (aq+ acc baq) for vwab-sum = other
+         then (aq+ vwab-sum other) sum (* (price bp) (quantity baq)) into pwa
+         when (> (quantity acc) (quantity given)) return
+           (let* ((excess (aq- acc given))
+                  (other (cons-aq (asset other)
+                                  (* (quantity other)
+                                     (/ (quantity excess) (quantity baq)))))
+                  (recur (aq- vwab-sum other)))
+             (values (cons (list bp excess other) bases)
+                     (cons-mp (market bp)
+                              (/ (- pwa (* (price bp) (quantity excess)))
+                                 (quantity given))) recur))
+         when (null bases) return
+           (values nil (aq/ vwab-sum acc) vwab-sum))
+    ((or division-by-zero arithmetic-error) ())))
 
 (defun update-bases (tracker trade)
   (with-slots (bases) tracker
@@ -654,4 +709,53 @@ need-to-use basis, rather than upon initial loading of the exchange API.")
 ;;;
 
 (defgeneric post-offer (gate offer))
-(defgeneric cancel-offer (gate offer))
+(defgeneric cancel-offer (gate offer)
+  (:method ((gate gate) (offer offer))
+    (warn "Tried cancelling unplaced offer ~A" offer)))
+
+(defclass supplicant (parent)
+  ((gate :initarg :gate) (market :initarg :market :reader market) placed
+   (response :initform (make-instance 'channel))
+   (abbrev :allocation :class :initform "supplicant")
+   (treasurer :initarg :treasurer) (lictor :initarg :lictor) (fee :initarg :fee)
+   (order-slots :initform 40 :initarg :order-slots)))
+
+(defun offers-spending (ope asset)
+  (remove asset (slot-value ope 'placed)
+          :key #'consumed-asset :test-not #'eq))
+
+(defun balance-guarded-place (ope offer &aux (asset (consumed-asset offer)))
+  (with-slots (gate placed order-slots treasurer) ope
+    (let* ((spending (offers-spending ope asset))
+           (mapreduc (reduce #'aq+ (mapcar #'given spending)
+                             :initial-value (given offer)))
+           (ourfunds (asset-funds asset (slot-reduce treasurer balances))))
+      (when (and (>= ourfunds (scaled-quantity mapreduc))
+                 (> order-slots (length placed)))
+        (awhen1 (post-offer gate offer) (push it placed))))))
+
+(defmethod execute ((supplicant supplicant) (command cons))
+  (with-slots (gate response placed) supplicant
+    (send response
+          (ecase (car command)
+            (:offer (balance-guarded-place supplicant (cdr command)))
+            (:cancel (awhen1 (cancel-offer gate (cdr command))
+                      (setf placed (remove (oid (cdr command))
+                                           placed :key #'oid))))))))
+
+(defmethod christen ((supplicant supplicant) (type (eql 'actor)))
+  (with-aslots (gate market) supplicant
+    (format nil "~A ~A" (name gate) (name market))))
+
+(defmethod initialize-instance :after ((supp supplicant) &key)
+  (macrolet ((init (slot class)
+               `(unless (ignore-errors ,slot)
+                  (adopt supp (setf ,slot (make-instance
+                                           ',class :delegates `(,supp)))))))
+    (with-slots (fee lictor treasurer placed market gate) supp
+      (adopt supp (ensure-running market)) (adopt supp gate)
+      (init   fee          fee-tracker)
+      (init  lictor  execution-tracker)
+      (init treasurer  balance-tracker)
+      (unless (ignore-errors placed)
+        (setf placed (placed-offers gate))))))

@@ -48,7 +48,7 @@
   (raw-request (concatenate 'string +public-stub+ path "?"
                             (urlencode-params data))))
 
-(defconstant +kludge+ -1424254890000)   ; sometimes one can!
+(defconstant +kludge+ -1439197049797)   ; sometimes one can!
 
 (defun nonce (&aux (now (now)))
   (princ-to-string (+ (floor (nsec-of now) 1000000)
@@ -166,7 +166,7 @@
                   (with-json-slots (pair type amount rate) data
                     (let* ((market (find-market pair *btce*))
                            (decimals (slot-value market 'decimals))
-                           (price-int (round (* rate (expt 10 decimals)))))
+                           (price-int (* rate (expt 10 decimals))))
                       (make-instance 'placed :oid (parse-integer (string id))
                                      :market market :volume amount
                                      :price (if (string= type "buy")
@@ -214,17 +214,27 @@
                                  ("buy" cost)
                                  ("sell" (* cost after-fee)))))))
 
-(defun raw-executions (gate &key pair from end)
-  (gate-request gate "TradeHistory"
-                `(,@(when pair `(("pair"    . ,pair)))
-                  ,@(when from `(("from_id" . ,(princ-to-string from))))
-                  ,@(when end  `(("end_id"  . ,(princ-to-string end)))))))
+(defun raw-executions (gate &key pair from end count)
+  (macrolet ((params (&body body)
+               `(append ,@(loop for (val key exp) in body
+                             collect `(when ,val `((,,key . ,,exp)))))))
+    (gate-request gate "TradeHistory"
+                  (params (pair "pair" pair) (count "count" count)
+                          (from "from_id" (princ-to-string from))
+                          (end "end_id" (princ-to-string end))))))
 
 (defmethod execution-since ((gate btce-gate) market since)
   (let ((txid (when since (txid since))))
     (awhen (raw-executions gate :pair (name market) :from txid)
       ;; btce's from_id is inclusive, although just using #'rest will bug out
       ;; in the case where from_id was in a different market. thus, #'remove
+      (remove txid (mapcar-jso #'parse-execution it) :key #'txid))))
+
+(defun executions-until (gate market until)
+  (let ((txid (when until (txid until))))
+    (awhen (raw-executions gate :pair (name market) :end txid)
+      ;; btce's end_id is inclusive, although just using #'rest will bug out
+      ;; in the case where end_id was in a different market. thus, #'remove
       (remove txid (mapcar-jso #'parse-execution it) :key #'txid))))
 
 (defun post-raw-limit (gate type market price volume)
@@ -256,7 +266,7 @@
 (defun cancel-raw-order (gate oid)
   (gate-request gate "CancelOrder" `(("order_id" . ,oid))))
 
-(defmethod cancel-offer ((gate btce-gate) offer)
+(defmethod cancel-offer ((gate btce-gate) (offer placed))
   ;; (format t "~&cancel ~A~%" offer)
   (multiple-value-bind (ret err)
       (cancel-raw-order gate (princ-to-string (oid offer)))

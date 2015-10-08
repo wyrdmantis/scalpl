@@ -258,8 +258,8 @@
 (defmethod execution-since ((gate kraken-gate) (market market) since)
   (awhen (raw-executions gate :start since)
     (with-json-slots (trades) it
-        (remove market (mapcar-jso #'parse-execution trades)
-                :key #'market :test-not #'eq))))
+      (remove market (mapcar-jso #'parse-execution trades)
+              :key #'market :test-not #'eq))))
 
 #+nil
 (defun trades-history-chunk (tracker &key until since)
@@ -329,7 +329,7 @@
 (defun cancel-order (gate oid)
   (gate-request gate "CancelOrder" `(("txid" . ,oid))))
 
-(defmethod cancel-offer ((gate kraken-gate) offer)
+(defmethod cancel-offer ((gate kraken-gate) (offer placed))
   ;; (format t "~&cancel ~A~%" offer)
   (multiple-value-bind (ret err) (cancel-order gate (oid offer))
     (or ret (search "Unknown order" (car err)))))

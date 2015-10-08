@@ -1,5 +1,6 @@
 (defpackage #:scalpl.util
-  (:use #:c2cl #:anaphora #:parse-float #:string-case #:local-time)
+  (:use #:c2cl #:anaphora #:parse-float
+        #:string-case #:local-time #:split-sequence)
   (:export #:once-only
            #:shallow-copy
            #:dbz-guard
@@ -27,11 +28,27 @@
            #:jso-keys
            #:with-json-slots
            #:mapjso*
+           #:short-month-index
+           #:parse-rfc1123-timestring
            ))
 
 (in-package #:scalpl.util)
 
 ;;; Actually useful
+
+(defun short-month-index (short-name)
+  (string-case (short-name)
+    ("Jan" 1) ("Feb" 2) ("Mar" 3) ("Apr" 4) ("May" 5) ("Jun" 6)
+    ("Jul" 7) ("Aug" 8) ("Sep" 9) ("Oct" 10) ("Nov" 11) ("Dec" 12)))
+
+;;; TODO: row, row, row, your boat, gently up the stream...
+(defun parse-rfc1123-timestring (timestring &key) ; TODO: fail-on-error etc
+  (destructuring-bind (dd mmm yyyy hhmmss zone)
+      (cdr (split-sequence #\Space timestring))
+    (let ((temp (format nil "~A-~2,'0D-~AT~A~A"
+                        yyyy (short-month-index mmm) dd hhmmss zone)))
+      (declare (dynamic-extent temp))
+      (parse-rfc3339-timestring temp))))
 
 (defun strftime (&optional datep &aux bits)
   (let ((data (multiple-value-list      ; my kingdom for a stack!
@@ -167,8 +184,11 @@
 ;;; json
 
 (defun read-json (in)
-  (let ((cl-json:*json-identifier-name-to-lisp* 'identity))
-    (cl-json:decode-json-from-string in)))
+  (let ((cl-json:*real-handler* (lambda (x) (parse-float x :type 'rational)))
+        (cl-json:*json-identifier-name-to-lisp* 'identity))
+    (ctypecase in
+      (string (cl-json:decode-json-from-string in))
+      (stream (cl-json:decode-json in)))))
 
 (defun getjso (key &optional map)
   (if map (cdr (assoc key map :test #'string=))

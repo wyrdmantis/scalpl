@@ -1,14 +1,14 @@
 ```
-  ██████==▄████▄===▄▄▄=======██▓=====██▓███===██▓====
-▒██≡≡≡≡▒≡▒██▀≡▀█≡≡▒████▄≡≡≡≡▓██▒≡≡≡≡▓██░≡≡██▒▓██▒≡≡≡≡
-░=▓██▄===▒▓█====▄=▒██==▀█▄==▒██░====▓██░=██▓▒▒██░====
-≡≡▒≡≡≡██▒▒▓▓▄≡▄██▒░██▄▄▄▄██≡▒██░≡≡≡≡▒██▄█▓▒≡▒▒██░≡≡≡≡
-▒██████▒▒▒=▓███▀=░=▓█===▓██▒░██████▒▒██▒=░==░░██████▒
-▒.▒▓▒.▒.░░.░▒.▒..░.▒▒...▓▒█░░.▒░▓..░▒▓▒░.░..░░.▒░▓..░
- ░.▒..░.░..░..▒...`.░...▒▒.░░.░.▒..░░▒.░..`..░.░.▒..░
-   ░..░.`░..`..`.....`..▒.`░..░.░..`░░..`.....`░.░...
-      ░..░..░..markets..░...`..`.░..░.`..lisp...`░..░
-            ░.............mayhem..`..`............`..
+  SSSSSS==cCCCCc===aAAa======LL&=====PPPPPP===LL&====
+#SS----#-#CC--CC--#AAAAa----&LL#----&PPo--PP#&LL#----
+o=&SSs===#&c======#AA==Aa=-=#LLo====&PPPPPP&##LLo====
+--#-&SSS##&Cc-CCC#oAAaaaAA--#LLo----#PPP#==-##LLo----
+#SSSSSS###=&CCCC=o=&A===&AA#oLLLLLL##PP#=o==ooLLLLLL#
+#.#&#.#.oo.o#.#..o.##...&#Aoo.#o&..o#P#o.o..oo.#o&..o
+ o.#..o.o..o..#...`.o...##.oo.o.#..o&#.o..`..o.o.#..o
+   o..o.`o..`..`.....`..#.`o..o.o..`oo..`.....`o.o...
+      o..o..o..markets..o...`..`.o..o.`..lisp...`o..o
+            o.............mayhem..`..`............`..
 ```
 
 # Legal-_ease_
@@ -20,13 +20,18 @@ The software is provided devoid of warantee, guarranty, liesense, and noncence:
 
 ScalpL *will be* an engine for expressing arbitrarily intricate policies for
 placement and removal of offers in asset exchanges; today, it *is* hardcoded
-as a market maker.
+as a market maker. We also *endeavor* to extend [Kerckhoff's
+Principle](https://en.wikipedia.org/wiki/Kerckhoffs%27s_principle) to finance,
+although a full proof may require [un?]countably infinitely many steps.
 
 # Exchanges
 
 Three Bitcoin exchanges are supported: [Bitfinex](https://www.bitfinex.com),
-[BTC-e](https://www.btc-e.com), and [Kraken](https://www.kraken.com). More is
-in the works; contact Adlai on Freenode for details and inquiries.
+[BTC-e](https://www.btc-e.com), and [Kraken](https://www.kraken.com). ScalpL
+also supports [MPExAgent](https://github.com/jurov/MPExAgent), if your luck
+includes a seat at [that table](http://mpex.ws/faq.html).
+
+More's ever in the works; contact Adlai for details.
 
 # Mockumentation
 
@@ -55,7 +60,7 @@ larval lisper's quest; and
 summarize the Bitcoin phenomenon for the unfamiliar, purely as enrichment;
 though catalyzed by cryptocurrency, ScalpL itself is agn-_asset_-ic.
 
-# Current Status
+# Current Status [![Build Status](https://travis-ci.org/adlai/scalpl.svg?branch=master)](https://travis-ci.org/adlai/scalpl) [![Quicklisp](http://quickdocs.org/badge/scalpl.svg)](http://quickdocs.org/scalpl/)
 
 ## Taming the Beast
 
