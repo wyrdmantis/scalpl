@@ -53,7 +53,7 @@
 ;;; 2) profitable spread - already does (via ecase spaghetti)
 ;;; 3) profit vs recent cost basis - done, shittily - TODO parametrize depth
 
-(defmethod perform ((filter filter))
+(defmethod perform ((filter filter) &key)
   (with-slots (market book-cache bids asks frequency supplicant) filter
     (let ((book (recv (slot-reduce market book-tracker output))))
       (unless (eq book book-cache)
@@ -95,7 +95,7 @@
 ;;; receives target bids and asks in the next-bids and next-asks channels
 ;;; sends commands in the control channel through #'ope-place
 ;;; sends completion acknowledgement to response channel
-(defmethod perform ((prioritizer prioritizer))
+(defmethod perform ((prioritizer prioritizer) &key)
   (with-slots (next-bids next-asks response frequency) prioritizer
     (multiple-value-bind (next source)
         (recv (list next-bids next-asks) :blockp nil)
@@ -218,7 +218,7 @@
                               (asks (punk vwab  price 0 ask)))))
                         #'dunk book))))))
 
-(defmethod perform ((ope ope-scalper))
+(defmethod perform ((ope ope-scalper) &key)
   (with-slots (input output filter prioritizer epsilon frequency) ope
     (destructuring-bind (primary counter resilience ratio) (recv input)
       (with-slots (next-bids next-asks response) prioritizer
@@ -297,7 +297,8 @@
 (defun makereport (maker fund rate btc doge investment risked skew &optional ha)
   (with-slots (name market ope snake last-report) maker
     (unless ha
-      (let ((new-report (list btc doge investment risked skew)))
+      (let ((new-report (list btc doge investment risked skew
+                              (first (slot-reduce maker lictor trades)))))
         (if (equal last-report new-report) (return-from makereport)
             (setf last-report new-report))))
     (labels ((sastr (side amount) ; TODO factor out aqstr
@@ -314,7 +315,8 @@
               (apply 'profit-snake (slot-reduce ope supplicant lictor) snake))))
   (force-output))
 
-(defmethod perform ((maker maker))
+(defmethod perform ((maker maker) &key)
+  (call-next-method maker :blockp ())
   (with-slots (fund-factor resilience-factor targeting-factor skew-factor
                market name ope cut) maker
     ;; Get our balances
@@ -383,7 +385,7 @@
     (let ((aq1 (aq- (side-sum "buy"  #'taken) (side-sum "sell" #'given)))
           (aq2 (aq- (side-sum "sell" #'taken) (side-sum "buy"  #'given))))
       (ecase (- (signum (quantity aq1)) (signum (quantity aq2)))
-        (0 (values nil aq1 aq2))
+        ((0 1 -1) (values nil aq1 aq2))
         (-2 (values (aq/ (- (conjugate aq1)) aq2) aq2 aq1))
         (+2 (values (aq/ (- (conjugate aq2)) aq1) aq1 aq2))))))
 
@@ -425,9 +427,36 @@
           (when source (send source next)))))
     (when market (path maker market book-tracker))))
 
-
 (defmethod describe-object ((maker maker) (stream t))
   (print-book (slot-reduce maker ope)) (performance-overview maker)
   (multiple-value-call 'format
     t "~@{~A~#[~:; ~]~}" (name maker)
     (trades-profits (slot-reduce maker ope supplicant lictor trades))))
+
+#+clozure
+(progn
+  (defclass memory-supervisor (actor)
+    ((to-halt :initarg :to-halt) (trigger :initarg :trigger)
+     (frequency :initarg :frequency :initform 15)
+     (leave-alive :initarg :leave-alive :initform 2)))
+
+  (defmethod christen ((supervisor memory-supervisor) (type (eql 'actor)))
+    (format () "memory supervisor ~A"
+            (first (last (slot-value supervisor 'to-halt)))))
+
+  (defmethod perform ((supervisor memory-supervisor) &key)
+    (with-slots (to-halt frequency trigger leave-alive tasks) supervisor
+      (sleep frequency)
+      (when (or (> (memory-usage) trigger)
+                (> (length (pooled-tasks)) 17)) ; races, hardcoding, :(
+        (etypecase leave-alive
+          (integer
+           (mapc #'halt (reverse to-halt)) (sleep frequency)
+           (mapc 'kill (mapcar 'task-thread
+                               (set-difference (butlast (pooled-tasks)
+                                                        leave-alive)
+                                               tasks))) ; nerd motivation!
+           (loop until (< (memory-usage) trigger) do
+                (ccl:gc) (sleep frequency))
+           (mapc #'reinitialize-instance to-halt)) ; races :(
+          (function (error "TODO")))))))
